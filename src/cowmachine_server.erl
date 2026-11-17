@@ -229,21 +229,32 @@ of_req(_Req) -> cowmachine_server_cowboy.
 %% the configured server changes later.
 -spec start_listener(listener_ref(), listener_opts()) -> {ok, pid()} | {error, term()}.
 start_listener(Ref, Opts) ->
-    Server = module(),
-    case Server:start_listener(Ref, Opts) of
-        {ok, _} = Ok ->
-            persistent_term:put({?MODULE, Ref}, Server),
-            Ok;
-        {error, _} = Error ->
-            Error
-    end.
+    with_listener_lock(Ref, fun() ->
+        Server = module(),
+        case Server:start_listener(Ref, Opts) of
+            {ok, _} = Ok ->
+                persistent_term:put({?MODULE, Ref}, Server),
+                Ok;
+            {error, _} = Error ->
+                Error
+        end
+    end).
 
 %% @doc Stop the listener named `Ref'.
 -spec stop_listener(listener_ref()) -> ok | {error, not_found}.
 stop_listener(Ref) ->
-    Result = (server(Ref)):stop_listener(Ref),
-    _ = persistent_term:erase({?MODULE, Ref}),
-    Result.
+    with_listener_lock(Ref, fun() ->
+        Result = (server(Ref)):stop_listener(Ref),
+        _ = persistent_term:erase({?MODULE, Ref}),
+        Result
+    end).
+
+%% Starting and stopping a listener take its lock, so that a stop and a
+%% start of the same name, from different processes, can't interleave and
+%% leave the record of its server stale.
+-spec with_listener_lock(listener_ref(), fun(() -> Result)) -> Result.
+with_listener_lock(Ref, Fun) ->
+    global:trans({{?MODULE, Ref}, self()}, Fun, [node()]).
 
 %% @doc The port the listener named `Ref' is bound to. For a listener started
 %% on port `0' it is the one the operating system picked.

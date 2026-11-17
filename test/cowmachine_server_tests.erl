@@ -47,6 +47,33 @@ listener_server_test() ->
         application:unset_env(cowmachine, server)
     end.
 
+%% Starting a listener holds its lock, which stopping it takes too, so a stop
+%% and a start of the same name don't interleave.
+listener_lock_test() ->
+    application:set_env(cowmachine, server, cowmachine_fake_server),
+    Self = self(),
+    Lock = {{cowmachine_server, locked_listener}, Self},
+    try
+        _ = spawn(fun() ->
+            Self ! {started, cowmachine_server:start_listener(locked_listener, #{
+                port => 0, middlewares => [], owner => Self
+            })}
+        end),
+        Starter = receive
+            {cowmachine_fake_server, starting, Pid} -> Pid
+        end,
+        ?assertNot(global:set_lock(Lock, [node()], 0)),
+        Starter ! {cowmachine_fake_server, proceed},
+        receive
+            {started, Started} -> ?assertMatch({ok, _}, Started)
+        end,
+        ?assert(global:set_lock(Lock, [node()], 0)),
+        true = global:del_lock(Lock, [node()]),
+        ?assertEqual({error, not_found}, cowmachine_server:stop_listener(locked_listener))
+    after
+        application:unset_env(cowmachine, server)
+    end.
+
 websocket_upgrade_test() ->
     Req = req(),
     ?assertEqual({ok, Req, #{ e => 1 }},

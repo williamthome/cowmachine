@@ -25,6 +25,13 @@
     websocket_upgrade/5
 ]).
 
+%% With an `owner', a start tells it and waits to be let go, so a test can
+%% act while the start is in progress.
+start_listener(_Ref, #{ owner := Owner }) ->
+    Owner ! {?MODULE, starting, self()},
+    receive
+        {?MODULE, proceed} -> {ok, self()}
+    end;
 start_listener(Ref, _Opts) -> {error, {not_a_listener, Ref}}.
 
 stop_listener(_Ref) -> {error, not_found}.
