@@ -125,7 +125,7 @@
     set_options/2
 ]).
 
--export_type([req/0, request_opts/0]).
+-export_type([req/0, request_opts/0, urlencoded_body_opts/0]).
 
 -type req() :: cowboy_req:req().
 %% The raw request, a map shaped like Cowboy's.
@@ -135,6 +135,15 @@
     metrics_user_data => map()
 }.
 %% The options `set_options/2' changes while a request is served.
+
+-type urlencoded_body_opts() :: #{
+    length => non_neg_integer() | infinity,
+    period => non_neg_integer(),
+    timeout => timeout(),
+    max_keys => non_neg_integer()
+}.
+%% The body-reading options of `cowboy_req:read_body/2', and `max_keys', the
+%% most keys the body may have, which newer Cowboy releases take.
 
 %%
 %% Reading the request
@@ -280,13 +289,20 @@ read_urlencoded_body(Req) ->
 
 %% @doc Read and decode an urlencoded body, as
 %% `cowboy_req:read_urlencoded_body/2'.
--spec read_urlencoded_body(Req, cowboy_req:read_body_opts()) ->
+-spec read_urlencoded_body(Req, urlencoded_body_opts()) ->
     {ok, [{binary(), binary() | true}], Req} when Req :: req().
-read_urlencoded_body(Req0, Opts) ->
-    case read_body(Req0, Opts) of
+read_urlencoded_body(Req, Opts) ->
+    case cowmachine_server:of_req(Req) of
+        cowmachine_server_cowboy -> cowboy_req:read_urlencoded_body(Req, Opts);
+        _Server -> read_urlencoded_body_1(Req, Opts)
+    end.
+
+%% Cowboy's `read_urlencoded_body/2', reading through the request's server.
+read_urlencoded_body_1(Req0, Opts) ->
+    case read_body(Req0, maps:without([max_keys], Opts)) of
         {ok, Body, Req} ->
             try
-                {ok, cow_qs:parse_qs(Body), Req}
+                {ok, parse_qs(Body, Opts), Req}
             catch _:_:Stacktrace ->
                 erlang:raise(exit, {request_error, urlencoded_body,
                                     'Malformed body; application/x-www-form-urlencoded expected.'},
@@ -303,6 +319,18 @@ read_urlencoded_body(Req0, Opts) ->
             end
     end.
 
+%% `cow_qs:parse_qs/2', which takes `max_keys', is only in newer cowlib
+%% releases; with an older one, `max_keys' is ignored, as Cowboy releases
+%% that use that cowlib ignore it.
+parse_qs(Body, #{ max_keys := MaxKeys }) ->
+    {module, CowQs} = code:ensure_loaded(cow_qs),
+    case erlang:function_exported(CowQs, parse_qs, 2) of
+        true -> CowQs:parse_qs(Body, #{ max_keys => MaxKeys });
+        false -> cow_qs:parse_qs(Body)
+    end;
+parse_qs(Body, _Opts) ->
+    cow_qs:parse_qs(Body).
+
 %% @doc Read an urlencoded body and match it against constraints, as
 %% `cowboy_req:read_and_match_urlencoded_body/2'.
 -spec read_and_match_urlencoded_body(cowboy:fields(), Req) -> {ok, map(), Req} when Req :: req().
@@ -311,10 +339,18 @@ read_and_match_urlencoded_body(Fields, Req) ->
 
 %% @doc Read an urlencoded body and match it against constraints, as
 %% `cowboy_req:read_and_match_urlencoded_body/3'.
--spec read_and_match_urlencoded_body(cowboy:fields(), Req, cowboy_req:read_body_opts()) ->
+-spec read_and_match_urlencoded_body(cowboy:fields(), Req, urlencoded_body_opts()) ->
     {ok, map(), Req} when Req :: req().
-read_and_match_urlencoded_body(Fields, Req0, Opts) ->
-    {ok, Qs, Req} = read_urlencoded_body(Req0, Opts),
+read_and_match_urlencoded_body(Fields, Req, Opts) ->
+    case cowmachine_server:of_req(Req) of
+        cowmachine_server_cowboy -> cowboy_req:read_and_match_urlencoded_body(Fields, Req, Opts);
+        _Server -> read_and_match_urlencoded_body_1(Fields, Req, Opts)
+    end.
+
+%% Cowboy's `read_and_match_urlencoded_body/3', reading through the request's
+%% server.
+read_and_match_urlencoded_body_1(Fields, Req0, Opts) ->
+    {ok, Qs, Req} = read_urlencoded_body_1(Req0, Opts),
     %% Cowboy's own matching, run on the decoded body re-encoded as a query
     %% string, with its error named as Cowboy names it for a body.
     try cowboy_req:match_qs(Fields, Req#{ qs => cow_qs:qs(Qs) }) of
@@ -437,10 +473,14 @@ stream_body(Data, IsFin, Req) -> (cowmachine_server:of_req(Req)):stream_body(Dat
 %% @doc Send server-sent events on a streamed response, as
 %% `cowboy_req:stream_events/3'.
 -spec stream_events(cow_sse:event() | [cow_sse:event()], fin | nofin, req()) -> ok.
-stream_events(Event, IsFin, Req) when is_map(Event) ->
-    stream_events([Event], IsFin, Req);
 stream_events(Events, IsFin, Req) ->
-    stream_body(cow_sse:events(Events), IsFin, Req).
+    case cowmachine_server:of_req(Req) of
+        cowmachine_server_cowboy -> cowboy_req:stream_events(Events, IsFin, Req);
+        _Server -> stream_body(cow_sse:events(event_list(Events)), IsFin, Req)
+    end.
+
+event_list(Event) when is_map(Event) -> [Event];
+event_list(Events) -> Events.
 
 %% @doc End a streamed response with trailers.
 -spec stream_trailers(cowboy:http_headers(), req()) -> ok.

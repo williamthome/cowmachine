@@ -117,6 +117,22 @@ read_urlencoded_body_test() ->
     ?assertExit({request_error, timeout, _},
                 ?M:read_urlencoded_body(req(#{ read_body => {more, <<"a=">>} }), #{})).
 
+%% On another server `max_keys' reaches the parser, which enforces it when
+%% the installed cowlib takes it, as Cowboy does; the body read itself
+%% doesn't get it.
+read_urlencoded_body_max_keys_test() ->
+    Req = req(#{ read_body => {ok, <<"a=1&b=2">>} }),
+    {module, cow_qs} = code:ensure_loaded(cow_qs),
+    case erlang:function_exported(cow_qs, parse_qs, 2) of
+        true ->
+            ?assertExit({request_error, urlencoded_body, _},
+                        ?M:read_urlencoded_body(Req, #{ max_keys => 1 }));
+        false ->
+            ?assertEqual({ok, [{<<"a">>, <<"1">>}, {<<"b">>, <<"2">>}], Req},
+                         ?M:read_urlencoded_body(Req, #{ max_keys => 1 }))
+    end,
+    ?assertEqual({read_body, #{}}, call()).
+
 read_and_match_urlencoded_body_test() ->
     Req = req(#{ read_body => {ok, <<"a=1">>} }),
     ?assertMatch({ok, #{ a := <<"1">> }, _}, ?M:read_and_match_urlencoded_body([a], Req)),
