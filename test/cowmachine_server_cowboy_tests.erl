@@ -5,6 +5,7 @@
 -include_lib("eunit/include/eunit.hrl").
 
 -export([execute/2]).
+-export([websocket_handle/2, websocket_info/2]).
 
 -define(ANY6, {0, 0, 0, 0, 0, 0, 0, 0}).
 
@@ -114,6 +115,28 @@ info_test() ->
     end,
     ?assertEqual({error, not_found}, cowmachine_server_cowboy:info(cowboy_gone)).
 
+%% A connection upgraded to a WebSocket stays among all the connections but
+%% leaves the active ones, as Cowboy takes it out of Ranch's count.
+info_websocket_test() ->
+    {ok, _} = application:ensure_all_started(cowmachine),
+    {ok, _} = cowmachine_server_cowboy:start_listener(cowboy_info_ws, #{
+        port => 0,
+        middlewares => [?MODULE],
+        env => #{ websocket => true }
+    }),
+    try
+        Port = cowmachine_server_cowboy:port(cowboy_info_ws),
+        {ok, Socket} = gen_tcp:connect({127, 0, 0, 1}, Port, [binary, {active, false}], 5000),
+        ok = gen_tcp:send(Socket, <<"GET / HTTP/1.1\r\nhost: localhost\r\n"
+            "connection: upgrade\r\nupgrade: websocket\r\nsec-websocket-version: 13\r\n"
+            "sec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n">>),
+        {ok, <<"HTTP/1.1 101 ", _/binary>>} = gen_tcp:recv(Socket, 0, 5000),
+        ok = wait_for_info(cowboy_info_ws, #{ active_connections => 0, all_connections => 1 }),
+        ok = gen_tcp:close(Socket)
+    after
+        ok = cowmachine_server_cowboy:stop_listener(cowboy_info_ws)
+    end.
+
 %% `cowmachine_cowreq''s own versions of Cowboy functions that would read the
 %% body or send around the server answer as Cowboy's do.
 cowboy_equivalence_test() ->
@@ -172,6 +195,8 @@ execute(#{ path := Path } = Req, #{ equivalence := true }) ->
         <<"ours">> -> cowmachine_cowreq
     end,
     {stop, equivalence(Module, Action, Req)};
+execute(Req, #{ websocket := true } = Env) ->
+    cowmachine_server:websocket_upgrade(Req, Env, ?MODULE, state, #{});
 execute(Req, #{ body := Body }) ->
     ok = cowmachine_cowreq:set_options(#{ metrics_user_data => #{ site => test } }, Req),
     {stop, cowmachine_cowreq:reply(200, #{}, Body, Req)}.
@@ -206,10 +231,20 @@ request(Port, Method, Path, Body) ->
     re:replace(Response, <<"(?i)\r\ndate: [^\r]*">>, <<>>, [{return, binary}]).
 
 wait_for_connections(Ref, N) ->
-    case cowmachine_server_cowboy:info(Ref) of
-        {ok, #{ active_connections := N, all_connections := N }} -> ok;
-        {ok, _} -> wait_for_connections(Ref, N)
+    wait_for_info(Ref, #{ active_connections => N, all_connections => N }).
+
+%% Wait until a listener's info has the values in `Expected'.
+wait_for_info(Ref, Expected) ->
+    {ok, Info} = cowmachine_server_cowboy:info(Ref),
+    case maps:with(maps:keys(Expected), Info) of
+        Expected -> ok;
+        _ -> wait_for_info(Ref, Expected)
     end.
+
+%% The WebSocket handler `info_websocket_test' upgrades to.
+websocket_handle(_Frame, State) -> {ok, State}.
+
+websocket_info(_Info, State) -> {ok, State}.
 
 rsa() ->
     [{key, {rsa, 2048, 65537}}].
