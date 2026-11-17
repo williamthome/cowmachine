@@ -62,7 +62,7 @@ stop_listener(Ref) ->
     cowboy:stop_listener(Ref).
 
 %% @private
--spec port(cowmachine_server:listener_ref()) -> inet:port_number().
+-spec port(cowmachine_server:listener_ref()) -> inet:port_number() | undefined.
 port(Ref) ->
     ranch:get_port(Ref).
 
@@ -76,8 +76,10 @@ info(Ref) ->
     try ranch:info(Ref) of
         Info -> {ok, listener_info(Info)}
     catch
-        %% Ranch raises badarg for a listener it doesn't know.
-        error:badarg -> {error, not_found}
+        %% Ranch raises badarg for a listener it doesn't know, and a call can
+        %% find the listener gone when it stops at the same time.
+        error:badarg -> {error, not_found};
+        exit:{noproc, _} -> {error, not_found}
     end.
 
 %% Ranch 1 reports a proplist and Ranch 2 a map, with the same keys. Dialyzer
@@ -87,7 +89,15 @@ info(Ref) ->
 listener_info(Info) when is_list(Info) ->
     listener_info(maps:from_list(Info));
 listener_info(Info) ->
-    maps:with([status, ip, port, active_connections, all_connections, max_connections], Info).
+    maps:filter(
+        fun known/2,
+        maps:with([status, ip, port, active_connections, all_connections, max_connections], Info)).
+
+%% A suspended listener has no address or port, and one on a Unix socket no
+%% IP address.
+known(ip, {local, _}) -> false;
+known(_Key, undefined) -> false;
+known(_Key, _Value) -> true.
 
 %% Ranch's options: the listener's socket options, and its connection limits.
 transport_opts(TlsOpts, #{ port := Port } = Opts) ->

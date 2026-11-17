@@ -161,15 +161,15 @@
 -type listener_info() :: #{
     status := running | suspended,
     ip => inet:ip_address(),
-    port := inet:port_number(),
+    port => inet:port_number(),
     active_connections := non_neg_integer(),
     all_connections := non_neg_integer(),
     max_connections := non_neg_integer() | infinity
 }.
 %% What `info/1' reports about a listener: whether it accepts connections
-%% (`running') or not (`suspended', such as while it drains), the address it
-%% is bound to when the server knows it, its port, the connections it serves
-%% and its limit.
+%% (`running') or not (`suspended', such as while it drains), the address and
+%% port it is bound to when the server knows them (a suspended Cowboy
+%% listener has none), the connections it serves and its limit.
 
 %% Listeners
 
@@ -178,7 +178,7 @@
 
 -callback stop_listener(Ref :: listener_ref()) -> ok | {error, not_found}.
 
--callback port(Ref :: listener_ref()) -> inet:port_number().
+-callback port(Ref :: listener_ref()) -> inet:port_number() | undefined.
 
 -callback info(Ref :: listener_ref()) -> {ok, listener_info()} | {error, not_found}.
 
@@ -251,14 +251,19 @@ stop_listener(Ref) ->
 
 %% Starting and stopping a listener take its lock, so that a stop and a
 %% start of the same name, from different processes, can't interleave and
-%% leave the record of its server stale.
+%% leave the record of its server stale. A process that finds the lock taken
+%% retries after a growing random wait (`global:trans/3'), so it can wait
+%% somewhat longer than the start or stop it waits for. A listener stopped
+%% outside these functions keeps its record until its name is started again;
+%% its server then answers `{error, not_found}' for it.
 -spec with_listener_lock(listener_ref(), fun(() -> Result)) -> Result.
 with_listener_lock(Ref, Fun) ->
     global:trans({{?MODULE, Ref}, self()}, Fun, [node()]).
 
 %% @doc The port the listener named `Ref' is bound to. For a listener started
-%% on port `0' it is the one the operating system picked.
--spec port(listener_ref()) -> inet:port_number().
+%% on port `0' it is the one the operating system picked. `undefined' when
+%% the listener holds no port, as a suspended Cowboy listener.
+-spec port(listener_ref()) -> inet:port_number() | undefined.
 port(Ref) ->
     (server(Ref)):port(Ref).
 

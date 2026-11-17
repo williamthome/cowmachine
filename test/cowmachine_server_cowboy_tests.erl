@@ -109,7 +109,15 @@ info_test() ->
         %% An open connection is counted.
         {ok, Socket} = gen_tcp:connect({127, 0, 0, 1}, Port, [binary, {active, false}], 5000),
         ok = wait_for_connections(cowboy_info, 1),
-        ok = gen_tcp:close(Socket)
+        ok = gen_tcp:close(Socket),
+        %% A suspended listener holds no address or port.
+        ok = ranch:suspend_listener(cowboy_info),
+        {ok, Suspended} = cowmachine_server_cowboy:info(cowboy_info),
+        ?assertMatch(#{ status := suspended, max_connections := 10 }, Suspended),
+        ?assertNot(maps:is_key(port, Suspended)),
+        ?assertNot(maps:is_key(ip, Suspended)),
+        ?assertEqual(undefined, cowmachine_server_cowboy:port(cowboy_info)),
+        ok = ranch:resume_listener(cowboy_info)
     after
         ok = cowmachine_server_cowboy:stop_listener(cowboy_info)
     end,
